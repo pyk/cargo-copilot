@@ -82,7 +82,7 @@ impl Copilot {
         let crate_name = crate_id.split('@').next().unwrap_or(&crate_id);
         self.run_cargo_doc(crate_name).await?;
         let html = self.read_doc_index_html(crate_name).await?;
-        let symbols = self.extract_symbols(&html);
+        let symbols = self.extract_symbols(&html, crate_name).await?;
         Ok(rmcp::Json(CrateSymbolListResponse { symbols }))
     }
 
@@ -239,7 +239,59 @@ impl Copilot {
     }
 
     // Extract symbol listings (modules, macros, structs, enums, functions, types) from index.html
-    fn extract_symbols(&self, html: &str) -> Vec<SymbolInfo> {
+    async fn extract_symbols(
+        &self,
+        html: &str,
+        crate_name: &str,
+    ) -> Result<Vec<SymbolInfo>, String> {
+        use std::collections::VecDeque;
+
+        // queue of (html_string, base_dir)
+        let mut queue: VecDeque<(String, std::path::PathBuf)> = VecDeque::new();
+        queue.push_back((html.to_string(), std::path::PathBuf::from("")));
+
+        let mut symbols: Vec<SymbolInfo> = Vec::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while let Some((page_html, base_dir)) = queue.pop_front() {
+            // process page synchronously
+            let (page_symbols, modules) = self.process_page(&page_html, &base_dir);
+            symbols.extend(page_symbols);
+
+            // schedule modules to visit
+            for module_path in modules {
+                if visited.contains(&module_path) {
+                    continue;
+                }
+                // attempt to read module html
+                match self
+                    .read_doc_html_by_rel_path(crate_name, &module_path)
+                    .await
+                {
+                    Ok(module_html) => {
+                        let parent = std::path::Path::new(&module_path)
+                            .parent()
+                            .unwrap_or(std::path::Path::new(""))
+                            .to_path_buf();
+                        queue.push_back((module_html, parent));
+                        visited.insert(module_path);
+                    }
+                    Err(_) => {
+                        // ignore missing module page
+                    }
+                }
+            }
+        }
+
+        Ok(symbols)
+    }
+
+    // Process a single page synchronously and extract SymbolInfo entries and module links to visit
+    fn process_page(
+        &self,
+        html: &str,
+        base_dir: &std::path::Path,
+    ) -> (Vec<SymbolInfo>, Vec<String>) {
         let document = scraper::Html::parse_document(html);
 
         // Mapping of section id -> symbol_type string
@@ -252,7 +304,8 @@ impl Copilot {
             ("types", "type_alias"),
         ];
 
-        let mut symbols = Vec::new();
+        let mut out = Vec::new();
+        let mut modules_to_visit = Vec::new();
 
         for (section_id, symbol_type) in sections {
             let selector_str = format!("h2#{} + dl.item-table", section_id);
@@ -262,7 +315,6 @@ impl Copilot {
             };
 
             for dl in document.select(&dl_selector) {
-                // iterate dt and dd in order
                 let pair_selector = match scraper::Selector::parse("dt, dd") {
                     Ok(s) => s,
                     Err(_) => continue,
@@ -270,42 +322,83 @@ impl Copilot {
 
                 let mut iter = dl.select(&pair_selector);
                 while let Some(item) = iter.next() {
-                    if item.value().name() == "dt" {
-                        // find anchor inside dt
-                        if let Some(a) = item.select(&scraper::Selector::parse("a").unwrap()).next()
+                    if item.value().name() == "dt"
+                        && let Some(a) = item.select(&scraper::Selector::parse("a").unwrap()).next()
+                    {
+                        let symbol_id = a.text().collect::<Vec<_>>().join("").trim().to_string();
+                        let href = a.value().attr("href").unwrap_or("").to_string();
+
+                        // Compute full relative path (normalize)
+                        let full_path = if base_dir.as_os_str().is_empty() {
+                            std::path::Path::new(&href).to_path_buf()
+                        } else {
+                            base_dir.join(&href)
+                        };
+                        let full_path = Self::normalize_rel_path(&full_path);
+                        let full_path_str = full_path.to_string_lossy().replace("\\", "/");
+
+                        // next should be dd (optional)
+                        let mut desc: Option<String> = None;
+                        if let Some(next_item) = iter.next()
+                            && next_item.value().name() == "dd"
                         {
-                            let symbol_id =
-                                a.text().collect::<Vec<_>>().join("").trim().to_string();
-                            let symbol_path = a.value().attr("href").unwrap_or("").to_string();
-
-                            // next should be dd (optional)
-                            let mut desc: Option<String> = None;
-                            if let Some(next_item) = iter.next() {
-                                if next_item.value().name() == "dd" {
-                                    let dd_html = next_item.inner_html();
-                                    let dd_md = html2md::parse_html(&dd_html);
-                                    let dd_trim = dd_md.trim().to_string();
-                                    if !dd_trim.is_empty() {
-                                        desc = Some(dd_trim);
-                                    }
-                                } else {
-                                    // if not dd, step back one by creating a small workaround: we can't un-next, so ignore
-                                }
+                            let dd_html = next_item.inner_html();
+                            let dd_md = html2md::parse_html(&dd_html);
+                            let dd_trim = dd_md.trim().to_string();
+                            if !dd_trim.is_empty() {
+                                desc = Some(dd_trim);
                             }
+                        }
 
-                            symbols.push(SymbolInfo {
-                                symbol_id,
-                                symbol_path,
-                                symbol_type: symbol_type.to_string(),
-                                symbol_description: desc,
-                            });
+                        out.push(SymbolInfo {
+                            symbol_id: symbol_id.clone(),
+                            symbol_path: full_path_str.clone(),
+                            symbol_type: symbol_type.to_string(),
+                            symbol_description: desc,
+                        });
+
+                        if symbol_type == "module" {
+                            modules_to_visit.push(full_path_str.clone());
                         }
                     }
                 }
             }
         }
 
-        symbols
+        (out, modules_to_visit)
+    }
+
+    // Read an arbitrary doc HTML file relative to the crate doc dir, e.g., "de/index.html" or "struct.Error.html"
+    async fn read_doc_html_by_rel_path(
+        &self,
+        crate_name: &str,
+        rel_path: &str,
+    ) -> Result<String, String> {
+        let path = std::path::Path::new("target")
+            .join("doc")
+            .join(crate_name)
+            .join(rel_path);
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        Ok(contents)
+    }
+
+    // Normalize a relative path, removing `./` and resolving `..` segments
+    fn normalize_rel_path(p: &std::path::Path) -> std::path::PathBuf {
+        let mut out = std::path::PathBuf::new();
+        for comp in p.components() {
+            match comp {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    let _ = out.pop();
+                }
+                std::path::Component::Normal(s) => out.push(s),
+                std::path::Component::RootDir => out.push(std::path::Path::new("/")),
+                std::path::Component::Prefix(_) => out.push(comp.as_os_str()),
+            }
+        }
+        out
     }
 }
 
