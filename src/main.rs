@@ -46,6 +46,31 @@ impl Copilot {
         Ok(rmcp::Json(CargoDependenciesResponse { crates }))
     }
 
+    #[tool(
+        name = "crate_overview",
+        description = "Fetch the main documentation page for a crate from local `cargo doc` and return as markdown"
+    )]
+    async fn crate_overview(
+        &self,
+        Parameters(CrateOverviewRequest { crate_id }): Parameters<CrateOverviewRequest>,
+    ) -> Result<String, String> {
+        // Accept `name@version` or `name`
+        let crate_name = crate_id.split('@').next().unwrap_or(&crate_id);
+
+        // Build docs (stable `cargo doc`); use --no-deps to reduce work
+        self.run_cargo_doc(crate_name).await?;
+
+        // Read the generated HTML and extract the first `div.docblock` content
+        let html = self.read_doc_index_html(crate_name).await?;
+        let docblock_html = self
+            .extract_docblock(&html)
+            .ok_or_else(|| "no <div class=\"docblock\"> found in index.html".to_string())?;
+
+        // Convert HTML to Markdown and return
+        let md = html2md::parse_html(&docblock_html);
+        Ok(md)
+    }
+
     // Fetch cargo metadata in a blocking task and convert errors to String for the tool API
     async fn get_metadata(&self) -> Result<cargo_metadata::Metadata, String> {
         tokio::task::spawn_blocking(|| cargo_metadata::MetadataCommand::new().exec())
@@ -153,6 +178,50 @@ impl Copilot {
         infos.dedup_by(|a, b| a.crate_id == b.crate_id);
         infos
     }
+
+    // Run `cargo doc --package <crate> --no-deps` to generate stable HTML docs
+    async fn run_cargo_doc(&self, crate_name: &str) -> Result<(), String> {
+        let status = tokio::process::Command::new("cargo")
+            .arg("doc")
+            .arg("--package")
+            .arg(crate_name)
+            .arg("--no-deps")
+            .status()
+            .await
+            .map_err(|e| format!("failed to spawn cargo doc: {}", e))?;
+
+        if !status.success() {
+            return Err(format!(
+                "cargo doc failed with status: {}. Ensure the package exists locally",
+                status
+            ));
+        }
+
+        Ok(())
+    }
+
+    // Read `target/doc/<crate>/index.html`
+    async fn read_doc_index_html(&self, crate_name: &str) -> Result<String, String> {
+        let path = std::path::Path::new("target")
+            .join("doc")
+            .join(crate_name)
+            .join("index.html");
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        Ok(contents)
+    }
+
+    // Extract inner HTML of the first `div.docblock` in the page
+    fn extract_docblock(&self, html: &str) -> Option<String> {
+        let document = scraper::Html::parse_document(html);
+        let selector = match scraper::Selector::parse("div.docblock") {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        let mut iter = document.select(&selector);
+        iter.next().map(|el| el.inner_html())
+    }
 }
 
 #[tool_handler]
@@ -171,6 +240,12 @@ pub struct SumRequest {
     #[schemars(description = "the left hand side number")]
     pub a: i32,
     pub b: i32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CrateOverviewRequest {
+    /// crate id in the form `name@version` or just `name`
+    pub crate_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
