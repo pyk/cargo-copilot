@@ -153,6 +153,7 @@ dependencies = [
  "cargo_metadata",
  "html2md",
  "rmcp",
+ "schemars",
  "scraper",
  "serde",
  "serde_json",
