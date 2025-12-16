@@ -1,8 +1,8 @@
 {
   "servers": {
-    "markdown-docs": {
+    "cargo-copilot": {
       "command": "cargo",
-      "args": ["copilot"]
+      "args": ["run"]
     }
   }
 }
