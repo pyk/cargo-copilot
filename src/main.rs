@@ -71,6 +71,21 @@ impl Copilot {
         Ok(md)
     }
 
+    #[tool(
+        name = "crate_symbol_list",
+        description = "List symbols (modules, macros, structs, enums, functions, types) from a crate's generated docs"
+    )]
+    async fn crate_symbol_list(
+        &self,
+        Parameters(CrateSymbolListRequest { crate_id }): Parameters<CrateSymbolListRequest>,
+    ) -> Result<rmcp::Json<CrateSymbolListResponse>, String> {
+        let crate_name = crate_id.split('@').next().unwrap_or(&crate_id);
+        self.run_cargo_doc(crate_name).await?;
+        let html = self.read_doc_index_html(crate_name).await?;
+        let symbols = self.extract_symbols(&html);
+        Ok(rmcp::Json(CrateSymbolListResponse { symbols }))
+    }
+
     // Fetch cargo metadata in a blocking task and convert errors to String for the tool API
     async fn get_metadata(&self) -> Result<cargo_metadata::Metadata, String> {
         tokio::task::spawn_blocking(|| cargo_metadata::MetadataCommand::new().exec())
@@ -222,6 +237,76 @@ impl Copilot {
         let mut iter = document.select(&selector);
         iter.next().map(|el| el.inner_html())
     }
+
+    // Extract symbol listings (modules, macros, structs, enums, functions, types) from index.html
+    fn extract_symbols(&self, html: &str) -> Vec<SymbolInfo> {
+        let document = scraper::Html::parse_document(html);
+
+        // Mapping of section id -> symbol_type string
+        let sections = vec![
+            ("modules", "module"),
+            ("macros", "macro"),
+            ("structs", "struct"),
+            ("enums", "enum"),
+            ("functions", "function"),
+            ("types", "type_alias"),
+        ];
+
+        let mut symbols = Vec::new();
+
+        for (section_id, symbol_type) in sections {
+            let selector_str = format!("h2#{} + dl.item-table", section_id);
+            let dl_selector = match scraper::Selector::parse(&selector_str) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            for dl in document.select(&dl_selector) {
+                // iterate dt and dd in order
+                let pair_selector = match scraper::Selector::parse("dt, dd") {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                let mut iter = dl.select(&pair_selector);
+                while let Some(item) = iter.next() {
+                    if item.value().name() == "dt" {
+                        // find anchor inside dt
+                        if let Some(a) = item.select(&scraper::Selector::parse("a").unwrap()).next()
+                        {
+                            let symbol_id =
+                                a.text().collect::<Vec<_>>().join("").trim().to_string();
+                            let symbol_path = a.value().attr("href").unwrap_or("").to_string();
+
+                            // next should be dd (optional)
+                            let mut desc: Option<String> = None;
+                            if let Some(next_item) = iter.next() {
+                                if next_item.value().name() == "dd" {
+                                    let dd_html = next_item.inner_html();
+                                    let dd_md = html2md::parse_html(&dd_html);
+                                    let dd_trim = dd_md.trim().to_string();
+                                    if !dd_trim.is_empty() {
+                                        desc = Some(dd_trim);
+                                    }
+                                } else {
+                                    // if not dd, step back one by creating a small workaround: we can't un-next, so ignore
+                                }
+                            }
+
+                            symbols.push(SymbolInfo {
+                                symbol_id,
+                                symbol_path,
+                                symbol_type: symbol_type.to_string(),
+                                symbol_description: desc,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        symbols
+    }
 }
 
 #[tool_handler]
@@ -246,6 +331,29 @@ pub struct SumRequest {
 pub struct CrateOverviewRequest {
     /// crate id in the form `name@version` or just `name`
     pub crate_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CrateSymbolListRequest {
+    /// crate id in the form `name@version` or just `name`
+    pub crate_id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SymbolInfo {
+    /// anchor text (symbol identifier)
+    pub symbol_id: String,
+    /// path/href to the symbol page from the crate docs (e.g., `macro.anyhow.html`)
+    pub symbol_path: String,
+    /// type of symbol: module|macro|struct|enum|function|type_alias
+    pub symbol_type: String,
+    /// optional description (converted to markdown)
+    pub symbol_description: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CrateSymbolListResponse {
+    pub symbols: Vec<SymbolInfo>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
