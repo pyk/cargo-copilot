@@ -1,6 +1,6 @@
 [package]
 name = "copilot"
-version = "0.0.1"
+version = "0.0.2"
 description = "MCP Server for Cargo"
 license = "MIT"
 edition = "2024"
