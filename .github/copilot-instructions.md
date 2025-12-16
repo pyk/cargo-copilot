@@ -31,3 +31,26 @@ in:
 with "hands" on a Rust project. It allows the LLM to run cargo commands, read
 compiler diagnostics, and manage dependencies directly through a standardized
 interface.
+
+---
+
+# CRITICAL: cargo-copilot Tool Usage
+
+You have access to the `cargo-copilot` MCP server. Follow this strict workflow
+to answer questions about the codebase:
+
+1.  **Discovery**: Use `cargo_dependencies` to see available crates.
+2.  **Overview**: Use `cargo_doc_overview` to understand a crate's purpose.
+3.  **Lookup**: Use `cargo_doc_index` to find the generated documentation
+    location for a symbol.
+4.  **Retrieval**: Use `cargo_doc_get` to read the documentation.
+
+**IMPORTANT CONSTRAINT**: Generated documentation paths (HTML) often differ from
+logical Rust module paths due to re-exports.
+
+- **NEVER guess** the `symbol_path` argument for `cargo_doc_get`.
+- **ALWAYS** copy the `symbol_path` strictly verbatim from the output of
+  `cargo_doc_index`.
+- If a path like `model/struct.ServerInfo.html` fails, it means the symbol is
+  documented elsewhere (e.g. `handler/server/struct.ServerInfo.html`). You must
+  check the index.
