@@ -6,6 +6,8 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::io::stdio,
 };
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone)]
 pub struct Copilot {
@@ -29,32 +31,63 @@ impl Copilot {
     fn sub(&self, Parameters(SubRequest { a, b }): Parameters<SubRequest>) -> String {
         (a - b).to_string()
     }
+
+    #[tool(
+        name = "cargo_dependencies",
+        description = "List all available dependencies (including dev dependencies)"
+    )]
+    async fn cargo_dependencies(&self) -> Result<rmcp::Json<CargoDependenciesResponse>, String> {
+        let metadata =
+            tokio::task::spawn_blocking(|| cargo_metadata::MetadataCommand::new().exec())
+                .await
+                .map_err(|e| format!("failed to run cargo metadata task: {}", e))?
+                .map_err(|e| format!("cargo metadata error: {}", e))?;
+
+        if let Some(root) = metadata.root_package() {
+            let mut ids = root
+                .dependencies
+                .iter()
+                .map(|d| d.name.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids.dedup();
+            Ok(rmcp::Json(CargoDependenciesResponse { package_ids: ids }))
+        } else {
+            Err("no root package found".into())
+        }
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for Copilot {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("A simple calculator".into()),
+            instructions: Some("MCP server for Cargo".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
     }
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SumRequest {
     #[schemars(description = "the left hand side number")]
     pub a: i32,
     pub b: i32,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SubRequest {
     #[schemars(description = "the left hand side number")]
     pub a: i32,
     #[schemars(description = "the right hand side number")]
     pub b: i32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CargoDependenciesResponse {
+    /// list of package ids (package names)
+    pub package_ids: Vec<String>,
 }
 
 // npx @modelcontextprotocol/inspector cargo run
