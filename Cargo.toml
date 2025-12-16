@@ -8,3 +8,4 @@ name = "cargo-copilot"
 path = "src/main.rs"
 
 [dependencies]
+rmcp = { version = "0.11.0", features = ["server"] }
