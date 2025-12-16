@@ -22,16 +22,6 @@ impl Copilot {
         }
     }
 
-    #[tool(description = "Calculate the sum of two numbers")]
-    fn sum(&self, Parameters(SumRequest { a, b }): Parameters<SumRequest>) -> String {
-        (a + b).to_string()
-    }
-
-    #[tool(description = "Calculate the difference of two numbers")]
-    fn sub(&self, Parameters(SubRequest { a, b }): Parameters<SubRequest>) -> String {
-        (a - b).to_string()
-    }
-
     #[tool(
         name = "cargo_dependencies",
         description = "List all available dependencies as crate ids (name@version)"
@@ -450,13 +440,6 @@ impl ServerHandler for Copilot {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SumRequest {
-    #[schemars(description = "the left hand side number")]
-    pub a: i32,
-    pub b: i32,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CrateOverviewRequest {
     /// crate id in the form `name@version` or just `name`
     pub crate_id: String,
@@ -491,14 +474,6 @@ pub struct SymbolInfo {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CrateSymbolListResponse {
     pub symbols: Vec<SymbolInfo>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SubRequest {
-    #[schemars(description = "the left hand side number")]
-    pub a: i32,
-    #[schemars(description = "the right hand side number")]
-    pub b: i32,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
