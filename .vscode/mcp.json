@@ -1,6 +1,6 @@
 {
   "servers": {
-    "cargo-copilot": {
+    "cargo-copilot-mcp": {
       "command": "cargo",
       "args": ["run"]
     }
