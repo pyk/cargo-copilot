@@ -57,9 +57,10 @@ pub struct SubRequest {
     pub b: i32,
 }
 
+// npx @modelcontextprotocol/inspector cargo run
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Starting cargo-copilot");
+    eprintln!("Starting cargo-copilot");
     let service = Copilot::new().serve(stdio()).await?;
 
     service.waiting().await?;
