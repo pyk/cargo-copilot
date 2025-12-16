@@ -86,6 +86,42 @@ impl Copilot {
         Ok(rmcp::Json(CrateSymbolListResponse { symbols }))
     }
 
+    #[tool(
+        name = "crate_symbol_get",
+        description = "Get full documentation page for a symbol as markdown"
+    )]
+    async fn crate_symbol_get(
+        &self,
+        Parameters(CrateSymbolGetRequest {
+            crate_id,
+            symbol_path,
+        }): Parameters<CrateSymbolGetRequest>,
+    ) -> Result<String, String> {
+        let crate_name = crate_id.split('@').next().unwrap_or(&crate_id);
+        self.run_cargo_doc(crate_name).await?;
+
+        // Normalize symbol_path: remove leading '/', append .html if missing
+        let mut rel = symbol_path.trim().trim_start_matches('/').to_string();
+        if !rel.ends_with(".html") {
+            rel.push_str(".html");
+        }
+
+        let html = self.read_doc_html_by_rel_path(crate_name, &rel).await?;
+
+        // Parse and extract <section id="main-content"> synchronously inside blocking task
+        let md = tokio::task::spawn_blocking(move || {
+            let document = scraper::Html::parse_document(&html);
+            let selector = scraper::Selector::parse("section#main-content").ok()?;
+            let content = document.select(&selector).next()?.inner_html();
+            Some(html2md::parse_html(&content))
+        })
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
+        .ok_or_else(|| "section#main-content not found".to_string())?;
+
+        Ok(md)
+    }
+
     // Fetch cargo metadata in a blocking task and convert errors to String for the tool API
     async fn get_metadata(&self) -> Result<cargo_metadata::Metadata, String> {
         tokio::task::spawn_blocking(|| cargo_metadata::MetadataCommand::new().exec())
@@ -430,6 +466,14 @@ pub struct CrateOverviewRequest {
 pub struct CrateSymbolListRequest {
     /// crate id in the form `name@version` or just `name`
     pub crate_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CrateSymbolGetRequest {
+    /// crate id in the form `name@version` or just `name`
+    pub crate_id: String,
+    /// symbol path relative to crate docs, e.g. `macro.anyhow` or `de/struct.Deserializer`
+    pub symbol_path: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
